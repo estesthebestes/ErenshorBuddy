@@ -1,0 +1,37 @@
+{
+  "Name": "Starter Boars",
+  "FarmAreaId": "StarterZone",
+  "MobPriorityNames": [
+    "Boar",
+    "Young Boar"
+  ],
+  "AbilityRotation": [
+    {
+      "AbilityId": "slot1",
+      "DisplayName": "Strike",
+      "MinPlayerHealthPercent": 0.0,
+      "MinResourcePercent": 0.0
+    },
+    {
+      "AbilityId": "slot2",
+      "DisplayName": "Heavy Swing",
+      "MinPlayerHealthPercent": 40.0,
+      "MinResourcePercent": 10.0
+    }
+  ],
+  "ResourceThresholds": {
+    "MinimumHealthPercent": 30.0,
+    "MinimumResourcePercent": 5.0
+  },
+  "StopConditions": {
+    "StopWhenInventoryFull": true,
+    "StopWhenDurabilityLow": true,
+    "MinimumDurabilityPercent": 10.0,
+    "MaxRuntimeMinutes": 45,
+    "MaxKills": 100
+  },
+  "PullRadius": 25.0,
+  "LeashRadius": 40.0,
+  "LootCorpses": true
+}
+

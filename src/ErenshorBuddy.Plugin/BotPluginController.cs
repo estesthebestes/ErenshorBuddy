@@ -1,0 +1,292 @@
+using System;
+using System.Collections.Concurrent;
+using BepInEx.Logging;
+using ErenshorBuddy.Contracts;
+using ErenshorBuddy.Core;
+
+namespace ErenshorBuddy.Plugin;
+
+internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
+{
+    private readonly ManualLogSource _logger;
+    private readonly PluginSettings _settings;
+    private readonly GoalDrivenAgent _agent = new();
+    private readonly BotRuntimeMemory _memory = new();
+    private readonly NamedPipeBotServer _pipeServer;
+    private readonly IGameWorldAdapter _worldAdapter;
+    private readonly IBotActuator _actuator;
+    private readonly ConcurrentQueue<BotCommandEnvelope> _pendingCommands = new();
+
+    private BotRunState _state = BotRunState.Idle;
+    private BotProfile? _activeProfile;
+    private AlertCode _alertCode = AlertCode.None;
+    private string? _alertDetail;
+    private string _currentAction = "Idle";
+    private GameSnapshot? _lastSnapshot;
+    private DateTime _lastStatusPushUtc = DateTime.MinValue;
+
+    public BotPluginController(ManualLogSource logger, PluginSettings settings)
+    {
+        _logger = logger;
+        _settings = settings;
+        _worldAdapter = new ReflectionGameWorldAdapter(_logger, settings);
+        _actuator = new WindowsInputActuator(_logger, settings);
+        _pipeServer = new NamedPipeBotServer(settings.PipeName, _pendingCommands, logger);
+    }
+
+    public void Start()
+    {
+        _pipeServer.Start();
+    }
+
+    public void Tick()
+    {
+        DrainCommands();
+
+        _lastSnapshot = _worldAdapter.CaptureSnapshot();
+        PublishSnapshot(_lastSnapshot);
+
+        if (_state == BotRunState.Running && _activeProfile != null)
+        {
+            ExecuteAgentTick(_activeProfile, _lastSnapshot);
+        }
+
+        if (DateTime.UtcNow - _lastStatusPushUtc >= TimeSpan.FromSeconds(1))
+        {
+            PublishStatus(BuildStatus());
+            _lastStatusPushUtc = DateTime.UtcNow;
+        }
+    }
+
+    public void Dispose()
+    {
+        _pipeServer.Dispose();
+        _actuator.StopAll();
+    }
+
+    public void PublishSnapshot(GameSnapshot snapshot)
+    {
+        _pipeServer.Publish(new PluginEventEnvelope
+        {
+            EventType = PluginEventType.Snapshot,
+            Snapshot = snapshot
+        });
+    }
+
+    public void PublishStatus(BotStatusPayload status)
+    {
+        _pipeServer.Publish(new PluginEventEnvelope
+        {
+            EventType = PluginEventType.Status,
+            Status = status
+        });
+    }
+
+    public void PublishLog(string message)
+    {
+        _pipeServer.Publish(new PluginEventEnvelope
+        {
+            EventType = PluginEventType.Log,
+            Message = message
+        });
+    }
+
+    private void DrainCommands()
+    {
+        while (_pendingCommands.TryDequeue(out var command))
+        {
+            switch (command.CommandType)
+            {
+                case BotCommandType.StartProfile:
+                    if (command.Profile == null)
+                    {
+                        SetAlert(AlertCode.ActionFailure, "StartProfile was received without a profile payload.");
+                        break;
+                    }
+
+                    _activeProfile = command.Profile;
+                    _memory.StartedAtUtc = DateTime.UtcNow;
+                    _memory.Counters.Kills = 0;
+                    _memory.Counters.ConsumablesUsed = 0;
+                    _memory.Counters.Elapsed = TimeSpan.Zero;
+                    _memory.ConsecutiveActionFailures = 0;
+                    _state = BotRunState.Running;
+                    _alertCode = AlertCode.None;
+                    _alertDetail = null;
+                    _currentAction = $"Running profile '{_activeProfile.Name}'";
+                    PublishLog(_currentAction);
+                    break;
+
+                case BotCommandType.Stop:
+                    StopBot("Stopped by companion command.");
+                    break;
+
+                case BotCommandType.Pause:
+                    _state = BotRunState.Paused;
+                    _currentAction = "Paused";
+                    _actuator.StopAll();
+                    break;
+
+                case BotCommandType.Resume:
+                    if (_activeProfile != null)
+                    {
+                        _state = BotRunState.Running;
+                        _alertCode = AlertCode.None;
+                        _alertDetail = null;
+                        _currentAction = $"Resumed profile '{_activeProfile.Name}'";
+                    }
+                    break;
+
+                case BotCommandType.RequestSnapshot:
+                    if (_lastSnapshot != null)
+                    {
+                        PublishSnapshot(_lastSnapshot);
+                    }
+                    break;
+
+                case BotCommandType.AcknowledgeAlert:
+                    _alertCode = AlertCode.None;
+                    _alertDetail = null;
+                    _state = _activeProfile == null ? BotRunState.Idle : BotRunState.Paused;
+                    _currentAction = "Alert acknowledged";
+                    break;
+            }
+        }
+    }
+
+    private void ExecuteAgentTick(BotProfile profile, GameSnapshot snapshot)
+    {
+        _memory.Counters.Elapsed = DateTime.UtcNow - _memory.StartedAtUtc;
+
+        if (_memory.LastTargetId != null
+            && snapshot.CurrentTarget != null
+            && snapshot.CurrentTarget.IsDead
+            && snapshot.CurrentTarget.Id == _memory.LastTargetId)
+        {
+            _memory.Counters.Kills++;
+            _memory.LastTargetId = null;
+        }
+
+        var decision = _agent.Decide(profile, snapshot, _memory);
+        _currentAction = decision.Reason ?? decision.DecisionType.ToString();
+
+        var success = true;
+        switch (decision.DecisionType)
+        {
+            case AgentDecisionType.Idle:
+                return;
+
+            case AgentDecisionType.AcquireTarget:
+                success = _actuator.AcquireTarget(profile, snapshot);
+                if (snapshot.CurrentTarget != null)
+                {
+                    _memory.LastTargetId = snapshot.CurrentTarget.Id;
+                }
+                break;
+
+            case AgentDecisionType.UseAbility:
+                if (string.IsNullOrWhiteSpace(decision.AbilityId))
+                {
+                    success = false;
+                    break;
+                }
+
+                var abilityId = decision.AbilityId!;
+                success = _actuator.UseAbility(abilityId, profile, snapshot);
+                break;
+
+            case AgentDecisionType.Reposition:
+                success = _actuator.MoveTowardTarget(snapshot);
+                break;
+
+            case AgentDecisionType.Loot:
+                success = _actuator.Loot(snapshot);
+                break;
+
+            case AgentDecisionType.Stop:
+                StopBot(decision.Reason ?? "Stop condition reached.");
+                return;
+
+            case AgentDecisionType.RaiseAlert:
+                SetAlert(MapAlert(snapshot, decision), decision.Reason ?? "Unknown alert.");
+                return;
+        }
+
+        if (!success)
+        {
+            _memory.ConsecutiveActionFailures++;
+            if (_memory.ConsecutiveActionFailures >= 3)
+            {
+                SetAlert(AlertCode.ActionFailure, $"Action failed repeatedly while {_currentAction.ToLowerInvariant()}");
+            }
+        }
+        else
+        {
+            _memory.ConsecutiveActionFailures = 0;
+        }
+    }
+
+    private BotStatusPayload BuildStatus()
+    {
+        return new BotStatusPayload
+        {
+            State = _state,
+            ProfileName = _activeProfile?.Name,
+            CurrentAction = _currentAction,
+            AlertCode = _alertCode,
+            AlertDetail = _alertDetail,
+            Counters = new SessionCounters
+            {
+                Kills = _memory.Counters.Kills,
+                ConsumablesUsed = _memory.Counters.ConsumablesUsed,
+                Elapsed = _memory.Counters.Elapsed
+            }
+        };
+    }
+
+    private void StopBot(string reason)
+    {
+        _state = BotRunState.Idle;
+        _currentAction = reason;
+        _activeProfile = null;
+        _actuator.StopAll();
+        PublishLog(reason);
+    }
+
+    private void SetAlert(AlertCode code, string detail)
+    {
+        _state = BotRunState.Alerting;
+        _alertCode = code;
+        _alertDetail = detail;
+        _currentAction = detail;
+        _actuator.StopAll();
+        PublishLog($"Alert: {detail}");
+    }
+
+    private static AlertCode MapAlert(GameSnapshot snapshot, AgentDecision decision)
+    {
+        if (snapshot.ErrorFlags.WrongZone)
+        {
+            return AlertCode.WrongZone;
+        }
+
+        if (snapshot.ErrorFlags.Stuck)
+        {
+            return AlertCode.Stuck;
+        }
+
+        if (snapshot.IsUiBlocked || snapshot.ErrorFlags.UiBlocked)
+        {
+            return AlertCode.UiBlocked;
+        }
+
+        if (snapshot.ErrorFlags.LostTarget || (snapshot.IsInCombat && snapshot.CurrentTarget == null))
+        {
+            return AlertCode.LostTarget;
+        }
+
+        return decision.DecisionType == AgentDecisionType.Stop
+            ? AlertCode.StopConditionReached
+            : AlertCode.ActionFailure;
+    }
+}

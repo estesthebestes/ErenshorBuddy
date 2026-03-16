@@ -1,0 +1,11 @@
+bin/
+obj/
+.vs/
+packages/
+TestResults/
+artifacts/
+*.user
+*.suo
+*.cache
+*.pdb
+
