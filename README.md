@@ -10,6 +10,20 @@ ErenshorBuddy is a starter repo for building an agentic helper for the Unity gam
 
 This repo is usable as a foundation, but it is not yet a fully game-aware Erenshor bot. The current Unity adapter uses generic reflection and scene heuristics that must be replaced with real Erenshor-specific bindings.
 
+## Quick start
+
+Run these from the repo root in PowerShell:
+
+```powershell
+$env:GameManagedDir='C:\Program Files (x86)\Steam\steamapps\common\Erenshor\Erenshor_Data\Managed'
+dotnet restore ErenshorBuddy.sln
+dotnet build ErenshorBuddy.sln -c Debug
+Copy-Item '.\src\ErenshorBuddy.Plugin\bin\Debug\net48\ErenshorBuddy.Plugin.dll' 'C:\Program Files (x86)\Steam\steamapps\common\Erenshor\BepInEx\plugins\' -Force
+Start-Process '.\src\ErenshorBuddy.Companion\bin\Debug\net8.0-windows\ErenshorBuddy.Companion.exe'
+```
+
+Before clicking `Start` in the companion app, copy `profiles\example-farm-profile.json` into `%AppData%\ErenshorBuddy\Profiles`.
+
 ## What this repo contains
 
 - `src/ErenshorBuddy.Contracts`
