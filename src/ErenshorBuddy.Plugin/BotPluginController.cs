@@ -157,6 +157,9 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
                     _memory.Counters.Kills = 0;
                     _memory.Counters.ConsumablesUsed = 0;
                     _memory.Counters.Elapsed = TimeSpan.Zero;
+                    _memory.LastTargetId = null;
+                    _memory.LastOpenedTargetId = null;
+                    _memory.AutoAttackTargetId = null;
                     _memory.ConsecutiveActionFailures = 0;
                     _state = BotRunState.Running;
                     _alertCode = AlertCode.None;
@@ -213,6 +216,17 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
         {
             _memory.Counters.Kills++;
             _memory.LastTargetId = null;
+            _memory.LastOpenedTargetId = null;
+            _memory.AutoAttackTargetId = null;
+        }
+
+        if (snapshot.CurrentTarget != null
+            && !snapshot.CurrentTarget.IsDead
+            && !string.Equals(_memory.LastTargetId, snapshot.CurrentTarget.Id, StringComparison.Ordinal))
+        {
+            _memory.LastTargetId = snapshot.CurrentTarget.Id;
+            _memory.LastOpenedTargetId = null;
+            _memory.AutoAttackTargetId = null;
         }
 
         var decision = _agent.Decide(profile, snapshot, _memory);
@@ -226,10 +240,6 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
 
             case AgentDecisionType.AcquireTarget:
                 success = _actuator.AcquireTarget(profile, snapshot);
-                if (snapshot.CurrentTarget != null)
-                {
-                    _memory.LastTargetId = snapshot.CurrentTarget.Id;
-                }
                 break;
 
             case AgentDecisionType.UseAbility:
@@ -241,6 +251,18 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
 
                 var abilityId = decision.AbilityId!;
                 success = _actuator.UseAbility(abilityId, profile, snapshot);
+                if (success && snapshot.CurrentTarget != null)
+                {
+                    _memory.LastOpenedTargetId = snapshot.CurrentTarget.Id;
+                }
+                break;
+
+            case AgentDecisionType.StartAutoAttack:
+                success = _actuator.StartAutoAttack(snapshot);
+                if (success && snapshot.CurrentTarget != null)
+                {
+                    _memory.AutoAttackTargetId = snapshot.CurrentTarget.Id;
+                }
                 break;
 
             case AgentDecisionType.Reposition:
@@ -297,6 +319,9 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
         _state = BotRunState.Idle;
         _currentAction = reason;
         _activeProfile = null;
+        _memory.LastTargetId = null;
+        _memory.LastOpenedTargetId = null;
+        _memory.AutoAttackTargetId = null;
         _actuator.StopAll();
         PublishLog(reason);
     }

@@ -1,5 +1,8 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using BepInEx.Logging;
@@ -13,6 +16,15 @@ internal sealed class WindowsInputActuator : IBotActuator
     private readonly ManualLogSource _logger;
     private readonly PluginSettings _settings;
     private readonly Dictionary<string, ushort> _abilityKeyMap;
+    private Type? _playerControlType;
+    private Type? _targetTrackerType;
+    private FieldInfo? _playerControlCurrentTargetField;
+    private FieldInfo? _playerControlTargetingField;
+    private FieldInfo? _playerControlMyCombatField;
+    private FieldInfo? _targetTrackerNearbyTargetsField;
+    private MethodInfo? _characterTargetMeMethod;
+    private MethodInfo? _playerCombatForceAttackOnMethod;
+    private MethodInfo? _playerCombatForceAttackOffMethod;
 
     public WindowsInputActuator(ManualLogSource logger, PluginSettings settings)
     {
@@ -31,7 +43,35 @@ internal sealed class WindowsInputActuator : IBotActuator
 
     public bool AcquireTarget(BotProfile profile, GameSnapshot snapshot)
     {
+        var selectedTarget = TargetSelection.SelectPullTarget(profile, snapshot);
+        if (selectedTarget == null)
+        {
+            return false;
+        }
+
+        if (TryTargetCharacter(selectedTarget.Id))
+        {
+            return true;
+        }
+
         return TapKey(ParseVirtualKey(_settings.PrimaryTargetKey));
+    }
+
+    public bool StartAutoAttack(GameSnapshot snapshot)
+    {
+        EnsureReflectionBindings();
+        var playerControl = ResolvePlayerControl();
+        var playerCombat = playerControl == null
+            ? null
+            : _playerControlMyCombatField?.GetValue(playerControl);
+
+        if (playerCombat == null || _playerCombatForceAttackOnMethod == null)
+        {
+            return false;
+        }
+
+        _playerCombatForceAttackOnMethod.Invoke(playerCombat, Array.Empty<object>());
+        return true;
     }
 
     public bool UseAbility(string abilityId, BotProfile profile, GameSnapshot snapshot)
@@ -60,7 +100,124 @@ internal sealed class WindowsInputActuator : IBotActuator
 
     public void StopAll()
     {
+        EnsureReflectionBindings();
+        var playerControl = ResolvePlayerControl();
+        var playerCombat = playerControl == null
+            ? null
+            : _playerControlMyCombatField?.GetValue(playerControl);
+
+        if (playerCombat != null && _playerCombatForceAttackOffMethod != null)
+        {
+            _playerCombatForceAttackOffMethod.Invoke(playerCombat, Array.Empty<object>());
+        }
+
         KeyUp(ParseVirtualKey(_settings.MoveForwardKey));
+    }
+
+    private bool TryTargetCharacter(string targetId)
+    {
+        EnsureReflectionBindings();
+
+        var playerControl = ResolvePlayerControl();
+        if (playerControl == null)
+        {
+            return false;
+        }
+
+        if (MatchesCharacterId(_playerControlCurrentTargetField?.GetValue(playerControl), targetId))
+        {
+            return true;
+        }
+
+        var targeting = _playerControlTargetingField?.GetValue(playerControl);
+        var targetCharacter = GetNearbyTargets(targeting).FirstOrDefault(character => MatchesCharacterId(character, targetId));
+        if (targetCharacter == null || _characterTargetMeMethod == null)
+        {
+            return false;
+        }
+
+        _characterTargetMeMethod.Invoke(targetCharacter, Array.Empty<object>());
+        return MatchesCharacterId(_playerControlCurrentTargetField?.GetValue(playerControl), targetId);
+    }
+
+    private void EnsureReflectionBindings()
+    {
+        if (_playerControlType != null)
+        {
+            return;
+        }
+
+        var assembly = AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(candidate => string.Equals(candidate.GetName().Name, "Assembly-CSharp", StringComparison.Ordinal));
+        if (assembly == null)
+        {
+            return;
+        }
+
+        _playerControlType = assembly.GetType("PlayerControl");
+        _targetTrackerType = assembly.GetType("TargetTracker");
+        var playerCombatType = assembly.GetType("PlayerCombat");
+        var characterType = assembly.GetType("Character");
+
+        if (_playerControlType != null)
+        {
+            _playerControlCurrentTargetField = _playerControlType.GetField("CurrentTarget", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            _playerControlTargetingField = _playerControlType.GetField("Targeting", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            _playerControlMyCombatField = _playerControlType.GetField("MyCombat", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        }
+
+        if (_targetTrackerType != null)
+        {
+            _targetTrackerNearbyTargetsField = _targetTrackerType.GetField("NearbyTargets", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        }
+
+        if (characterType != null)
+        {
+            _characterTargetMeMethod = characterType.GetMethod("TargetMe", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        }
+
+        if (playerCombatType != null)
+        {
+            _playerCombatForceAttackOnMethod = playerCombatType.GetMethod("ForceAttackOn", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            _playerCombatForceAttackOffMethod = playerCombatType.GetMethod("ForceAttackOff", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        }
+    }
+
+    private object? ResolvePlayerControl()
+    {
+        EnsureReflectionBindings();
+        return _playerControlType == null
+            ? null
+            : UnityEngine.Object.FindObjectOfType(_playerControlType);
+    }
+
+    private IEnumerable<object> GetNearbyTargets(object? targeting)
+    {
+        if (targeting == null || _targetTrackerNearbyTargetsField == null)
+        {
+            return Enumerable.Empty<object>();
+        }
+
+        if (_targetTrackerNearbyTargetsField.GetValue(targeting) is not IEnumerable nearbyTargets)
+        {
+            return Enumerable.Empty<object>();
+        }
+
+        return nearbyTargets
+            .Cast<object>()
+            .Where(IsLiveUnityObject);
+    }
+
+    private static bool MatchesCharacterId(object? character, string targetId)
+    {
+        return character is UnityEngine.Object unityObject
+               && unityObject != null
+               && string.Equals(unityObject.GetInstanceID().ToString(), targetId, StringComparison.Ordinal);
+    }
+
+    private static bool IsLiveUnityObject(object? value)
+    {
+        return value is UnityEngine.Object unityObject && unityObject != null;
     }
 
     private bool TapKey(ushort virtualKey)
@@ -138,4 +295,3 @@ internal sealed class WindowsInputActuator : IBotActuator
         public IntPtr dwExtraInfo;
     }
 }
-

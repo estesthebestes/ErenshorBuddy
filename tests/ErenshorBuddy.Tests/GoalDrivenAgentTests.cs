@@ -9,14 +9,46 @@ public sealed class GoalDrivenAgentTests
     private readonly GoalDrivenAgent _agent = new();
 
     [Fact]
-    public void Decide_NoTargetInFarmArea_AcquiresTarget()
+    public void Decide_NoTargetWithPreferredHostileInRange_AcquiresTarget()
     {
-        var decision = _agent.Decide(CreateProfile(), CreateSnapshot(), new BotRuntimeMemory());
+        var snapshot = CreateSnapshot();
+        snapshot.NearbyEntities.Add(new EntitySnapshot
+        {
+            Id = "mob-1",
+            Name = "Forest Boar",
+            Distance = 12,
+            IsHostile = true
+        });
+
+        var decision = _agent.Decide(CreateProfile(), snapshot, new BotRuntimeMemory());
         Assert.Equal(AgentDecisionType.AcquireTarget, decision.DecisionType);
     }
 
     [Fact]
-    public void Decide_TargetInRangeAndAbilityReady_UsesAbility()
+    public void Decide_NoPriorityMatchWithHostileInRange_AcquiresTarget()
+    {
+        var snapshot = CreateSnapshot();
+        snapshot.NearbyEntities.Add(new EntitySnapshot
+        {
+            Id = "mob-2",
+            Name = "Forest Wolf",
+            Distance = 10,
+            IsHostile = true
+        });
+
+        var decision = _agent.Decide(CreateProfile(), snapshot, new BotRuntimeMemory());
+        Assert.Equal(AgentDecisionType.AcquireTarget, decision.DecisionType);
+    }
+
+    [Fact]
+    public void Decide_NoTargetAndNoEligibleHostile_Idles()
+    {
+        var decision = _agent.Decide(CreateProfile(), CreateSnapshot(), new BotRuntimeMemory());
+        Assert.Equal(AgentDecisionType.Idle, decision.DecisionType);
+    }
+
+    [Fact]
+    public void Decide_TargetInRangeAndOpenerAvailable_UsesAbility()
     {
         var snapshot = CreateSnapshot();
         snapshot.CurrentTarget = new TargetSnapshot
@@ -39,6 +71,36 @@ public sealed class GoalDrivenAgentTests
         var decision = _agent.Decide(CreateProfile(), snapshot, new BotRuntimeMemory());
         Assert.Equal(AgentDecisionType.UseAbility, decision.DecisionType);
         Assert.Equal("slot1", decision.AbilityId);
+    }
+
+    [Fact]
+    public void Decide_TargetInRangeAfterOpener_StartsAutoAttack()
+    {
+        var snapshot = CreateSnapshot();
+        snapshot.CurrentTarget = new TargetSnapshot
+        {
+            Id = "mob-1",
+            Name = "Forest Boar",
+            IsHostile = true,
+            HealthPercent = 100,
+            Distance = 5
+        };
+        snapshot.Abilities.Add(new AbilitySnapshot
+        {
+            AbilityId = "slot1",
+            DisplayName = "Strike",
+            IsReady = true,
+            ResourceCostPercent = 0
+        });
+        snapshot.IsTargetInRange = true;
+
+        var memory = new BotRuntimeMemory
+        {
+            LastOpenedTargetId = "mob-1"
+        };
+
+        var decision = _agent.Decide(CreateProfile(), snapshot, memory);
+        Assert.Equal(AgentDecisionType.StartAutoAttack, decision.DecisionType);
     }
 
     [Fact]
@@ -80,6 +142,10 @@ public sealed class GoalDrivenAgentTests
         {
             Name = "Boar Farm",
             FarmAreaId = "StarterZone",
+            MobPriorityNames =
+            {
+                "Boar"
+            },
             AbilityRotation =
             {
                 new AbilityRule

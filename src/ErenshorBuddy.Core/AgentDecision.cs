@@ -4,6 +4,7 @@ public enum AgentDecisionType
 {
     Idle,
     AcquireTarget,
+    StartAutoAttack,
     UseAbility,
     Reposition,
     Loot,
@@ -17,4 +18,3 @@ public sealed class AgentDecision
     public string? AbilityId { get; set; }
     public string? Reason { get; set; }
 }
-

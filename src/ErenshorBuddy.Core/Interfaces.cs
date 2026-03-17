@@ -10,6 +10,7 @@ public interface IGameWorldAdapter
 public interface IBotActuator
 {
     bool AcquireTarget(BotProfile profile, GameSnapshot snapshot);
+    bool StartAutoAttack(GameSnapshot snapshot);
     bool UseAbility(string abilityId, BotProfile profile, GameSnapshot snapshot);
     bool MoveTowardTarget(GameSnapshot snapshot);
     bool Loot(GameSnapshot snapshot);
@@ -22,4 +23,3 @@ public interface IRuntimeEventSink
     void PublishStatus(BotStatusPayload status);
     void PublishLog(string message);
 }
-

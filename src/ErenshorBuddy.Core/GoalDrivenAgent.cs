@@ -43,10 +43,20 @@ public sealed class GoalDrivenAgent
                 return Alert("Combat was active but the target is missing.");
             }
 
+            var selectedTarget = TargetSelection.SelectPullTarget(profile, snapshot);
+            if (selectedTarget == null)
+            {
+                return new AgentDecision
+                {
+                    DecisionType = AgentDecisionType.Idle,
+                    Reason = "No eligible hostile is within pull radius."
+                };
+            }
+
             return new AgentDecision
             {
                 DecisionType = AgentDecisionType.AcquireTarget,
-                Reason = "No target selected."
+                Reason = $"Acquiring target '{selectedTarget.Name}'."
             };
         }
 
@@ -95,7 +105,7 @@ public sealed class GoalDrivenAgent
                    && snapshot.Player.ResourcePercent >= Math.Max(rule.MinResourcePercent, ability.ResourceCostPercent);
         });
 
-        if (usableAbility != null)
+        if (usableAbility != null && !string.Equals(memory.LastOpenedTargetId, snapshot.CurrentTarget.Id, StringComparison.Ordinal))
         {
             return new AgentDecision
             {
@@ -105,10 +115,19 @@ public sealed class GoalDrivenAgent
             };
         }
 
+        if (!string.Equals(memory.AutoAttackTargetId, snapshot.CurrentTarget.Id, StringComparison.Ordinal))
+        {
+            return new AgentDecision
+            {
+                DecisionType = AgentDecisionType.StartAutoAttack,
+                Reason = "Starting auto-attack on the current target."
+            };
+        }
+
         return new AgentDecision
         {
             DecisionType = AgentDecisionType.Idle,
-            Reason = "No ability is ready."
+            Reason = "Combat loop is waiting on the current target."
         };
     }
 
@@ -153,4 +172,3 @@ public sealed class GoalDrivenAgent
         return false;
     }
 }
-

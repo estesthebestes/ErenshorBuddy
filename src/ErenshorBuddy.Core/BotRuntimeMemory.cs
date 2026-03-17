@@ -7,7 +7,8 @@ public sealed class BotRuntimeMemory
 {
     public DateTime StartedAtUtc { get; set; } = DateTime.MinValue;
     public string? LastTargetId { get; set; }
+    public string? LastOpenedTargetId { get; set; }
+    public string? AutoAttackTargetId { get; set; }
     public int ConsecutiveActionFailures { get; set; }
     public SessionCounters Counters { get; } = new();
 }
-
