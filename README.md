@@ -4,7 +4,7 @@ ErenshorBuddy is a starter repo for building an agentic helper for the Unity gam
 
 - a `BepInEx` plugin that runs inside the game
 - a goal-driven combat loop scaffold
-- a local IPC layer for bot control and live status
+- a local file-based IPC layer for bot control and live status
 - a Windows companion app for starting, pausing, and monitoring the bot
 - shared contracts and unit tests for the decision engine
 
@@ -47,7 +47,7 @@ Implemented:
 
 - plugin bootstrap through `BepInEx`
 - profile-driven combat decisions
-- named-pipe communication between plugin and companion app
+- file-based communication between plugin and companion app
 - companion app controls for `Start`, `Pause`, `Resume`, `Stop`, `Request Snapshot`, and `Acknowledge Alert`
 - sample farming profile
 - build/testable shared contracts and decision logic
@@ -126,10 +126,10 @@ Build the solution, then launch the companion app from:
 src\ErenshorBuddy.Companion\bin\Debug\net8.0-windows\ErenshorBuddy.Companion.exe
 ```
 
-The companion app expects the plugin named pipe to be:
+The companion app expects the plugin runtime directory to be:
 
 ```text
-ErenshorBuddyPipe
+%AppData%\ErenshorBuddy\Runtime
 ```
 
 That default can be changed in the plugin config if needed.

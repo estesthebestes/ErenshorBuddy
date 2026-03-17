@@ -12,7 +12,7 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
     private readonly PluginSettings _settings;
     private readonly GoalDrivenAgent _agent = new();
     private readonly BotRuntimeMemory _memory = new();
-    private readonly NamedPipeBotServer _pipeServer;
+    private readonly FileBotRuntime _runtime;
     private readonly IGameWorldAdapter _worldAdapter;
     private readonly IBotActuator _actuator;
     private readonly ConcurrentQueue<BotCommandEnvelope> _pendingCommands = new();
@@ -24,6 +24,12 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
     private string _currentAction = "Idle";
     private GameSnapshot? _lastSnapshot;
     private DateTime _lastStatusPushUtc = DateTime.MinValue;
+    private DateTime _lastSnapshotPushUtc = DateTime.MinValue;
+    private DateTime _lastHeartbeatPushUtc = DateTime.MinValue;
+    private string _lastTickSource = string.Empty;
+    private DateTime _lastTickAtUtc = DateTime.MinValue;
+    private int _consecutiveTickFailures;
+    private long _tickCount;
 
     public BotPluginController(ManualLogSource logger, PluginSettings settings)
     {
@@ -31,42 +37,66 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
         _settings = settings;
         _worldAdapter = new ReflectionGameWorldAdapter(_logger, settings);
         _actuator = new WindowsInputActuator(_logger, settings);
-        _pipeServer = new NamedPipeBotServer(settings.PipeName, _pendingCommands, logger);
+        _runtime = new FileBotRuntime(settings.RuntimeDirectory, _pendingCommands, logger);
     }
 
     public void Start()
     {
-        _pipeServer.Start();
+        _runtime.Start();
+        PublishLog($"Runtime directory: {_settings.RuntimeDirectory}");
     }
 
-    public void Tick()
+    public void Tick(string source, DateTime tickUtc)
     {
+        _lastTickSource = source;
+        _lastTickAtUtc = tickUtc;
+        _consecutiveTickFailures = 0;
+        _tickCount++;
+        if (tickUtc - _lastHeartbeatPushUtc >= TimeSpan.FromSeconds(1))
+        {
+            _runtime.PublishHeartbeat(new RuntimeHeartbeat
+            {
+                TimestampUtc = tickUtc,
+                TickCount = _tickCount,
+                Phase = "TickStart",
+                LastTickSource = _lastTickSource,
+                LastTickUtc = _lastTickAtUtc,
+                ConsecutiveTickFailures = _consecutiveTickFailures
+            });
+            _lastHeartbeatPushUtc = tickUtc;
+        }
+
+        _runtime.DrainCommands();
         DrainCommands();
 
         _lastSnapshot = _worldAdapter.CaptureSnapshot();
-        PublishSnapshot(_lastSnapshot);
+        if (tickUtc - _lastSnapshotPushUtc >= TimeSpan.FromMilliseconds(250))
+        {
+            PublishSnapshot(_lastSnapshot);
+            _lastSnapshotPushUtc = tickUtc;
+        }
 
         if (_state == BotRunState.Running && _activeProfile != null)
         {
             ExecuteAgentTick(_activeProfile, _lastSnapshot);
         }
 
-        if (DateTime.UtcNow - _lastStatusPushUtc >= TimeSpan.FromSeconds(1))
+        if (tickUtc - _lastStatusPushUtc >= TimeSpan.FromSeconds(1))
         {
             PublishStatus(BuildStatus());
-            _lastStatusPushUtc = DateTime.UtcNow;
+            _lastStatusPushUtc = tickUtc;
         }
     }
 
     public void Dispose()
     {
-        _pipeServer.Dispose();
+        _runtime.Dispose();
         _actuator.StopAll();
     }
 
     public void PublishSnapshot(GameSnapshot snapshot)
     {
-        _pipeServer.Publish(new PluginEventEnvelope
+        _runtime.Publish(new PluginEventEnvelope
         {
             EventType = PluginEventType.Snapshot,
             Snapshot = snapshot
@@ -75,7 +105,7 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
 
     public void PublishStatus(BotStatusPayload status)
     {
-        _pipeServer.Publish(new PluginEventEnvelope
+        _runtime.Publish(new PluginEventEnvelope
         {
             EventType = PluginEventType.Status,
             Status = status
@@ -84,11 +114,29 @@ internal sealed class BotPluginController : IDisposable, IRuntimeEventSink
 
     public void PublishLog(string message)
     {
-        _pipeServer.Publish(new PluginEventEnvelope
+        _runtime.Publish(new PluginEventEnvelope
         {
             EventType = PluginEventType.Log,
             Message = message
         });
+    }
+
+    public void ReportTickException(string source, DateTime tickUtc, Exception ex)
+    {
+        _lastTickSource = source;
+        _lastTickAtUtc = tickUtc;
+        _consecutiveTickFailures++;
+        PublishLog($"Tick exception: {ex}");
+        _runtime.PublishHeartbeat(new RuntimeHeartbeat
+        {
+            TimestampUtc = tickUtc,
+            TickCount = _tickCount,
+            Phase = "TickException",
+            LastTickSource = _lastTickSource,
+            LastTickUtc = _lastTickAtUtc,
+            ConsecutiveTickFailures = _consecutiveTickFailures
+        });
+        _lastHeartbeatPushUtc = tickUtc;
     }
 
     private void DrainCommands()

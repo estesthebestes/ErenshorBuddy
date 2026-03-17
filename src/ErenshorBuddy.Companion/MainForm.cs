@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using ErenshorBuddy.Contracts;
 using Newtonsoft.Json;
 
@@ -6,10 +7,14 @@ namespace ErenshorBuddy.Companion;
 
 internal sealed class MainForm : Form
 {
-    private readonly NamedPipeCompanionClient _client = new();
+    private static readonly Regex TimestampedLogLine = new(@"^\[\d{2}:\d{2}:\d{2}\]\s", RegexOptions.Compiled);
+    private readonly FileBotRuntimeClient _client = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly ComboBox _profiles = new() { DropDownStyle = ComboBoxStyle.DropDownList };
-    private readonly TextBox _pipeName = new() { Text = "ErenshorBuddyPipe" };
+    private readonly TextBox _runtimeDirectory = new()
+    {
+        Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ErenshorBuddy", "Runtime")
+    };
     private readonly Label _connection = new() { AutoSize = true, Text = "Disconnected" };
     private readonly Label _state = new() { AutoSize = true, Text = "State: Idle" };
     private readonly Label _zone = new() { AutoSize = true, Text = "Zone: -" };
@@ -39,6 +44,11 @@ internal sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
 
         _client.EventReceived += OnEventReceived;
+        _client.Disconnected += () =>
+        {
+            SafeUi(() => _connection.Text = "Disconnected");
+            AppendLog("Disconnected from plugin.");
+        };
         EnsureProfilesDirectory();
 
         Controls.Add(BuildLayout());
@@ -82,8 +92,8 @@ internal sealed class MainForm : Form
         var snapshotButton = NewButton("Request Snapshot", async (_, _) => await SendCommandAsync(BotCommandType.RequestSnapshot).ConfigureAwait(false));
         var ackButton = NewButton("Ack Alert", async (_, _) => await SendCommandAsync(BotCommandType.AcknowledgeAlert).ConfigureAwait(false));
 
-        topPanel.Controls.Add(new Label { Text = "Pipe Name", AutoSize = true }, 0, 0);
-        topPanel.Controls.Add(_pipeName, 1, 0);
+        topPanel.Controls.Add(new Label { Text = "Runtime Dir", AutoSize = true }, 0, 0);
+        topPanel.Controls.Add(_runtimeDirectory, 1, 0);
         topPanel.Controls.Add(connectButton, 2, 0);
         topPanel.Controls.Add(_connection, 3, 0);
 
@@ -129,8 +139,8 @@ internal sealed class MainForm : Form
 
         try
         {
-            await _client.ConnectAsync(_pipeName.Text.Trim(), _cts.Token).ConfigureAwait(false);
-            SafeUi(() => _connection.Text = $"Connected to {_pipeName.Text.Trim()}");
+            await _client.ConnectAsync(_runtimeDirectory.Text.Trim(), _cts.Token).ConfigureAwait(false);
+            SafeUi(() => _connection.Text = "Connected");
             AppendLog("Connected to plugin.");
         }
         catch (Exception ex)
@@ -247,17 +257,20 @@ internal sealed class MainForm : Form
                     break;
 
                 case PluginEventType.Log:
-                    AppendLog(envelope.Message ?? string.Empty);
+                    AppendLog(envelope.Message ?? string.Empty, addTimestamp: !LooksTimestamped(envelope.Message));
                     break;
             }
         });
     }
 
-    private void AppendLog(string message)
+    private void AppendLog(string message, bool addTimestamp = true)
     {
         SafeUi(() =>
         {
-            _log.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
+            var rendered = addTimestamp
+                ? $"[{DateTime.Now:HH:mm:ss}] {message}"
+                : message;
+            _log.AppendText($"{rendered}{Environment.NewLine}");
         });
     }
 
@@ -284,5 +297,9 @@ internal sealed class MainForm : Form
         button.Click += onClick;
         return button;
     }
-}
 
+    private static bool LooksTimestamped(string? message)
+    {
+        return !string.IsNullOrWhiteSpace(message) && TimestampedLogLine.IsMatch(message);
+    }
+}
